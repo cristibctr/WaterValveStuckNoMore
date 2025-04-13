@@ -8,10 +8,9 @@
 #include <esp_event.h>
 #include <esp_wifi_default.h>
 #include <esp_wifi.h>
-#include <event_groups.h>
-#include <esp32-hal-gpio.h>
 #include "esp_sntp.h"
 #include <time.h>
+#include <driver/gpio.h>
 
 #define TAG "ValveActuator"
 #define WIFI_SSID CONFIG_ESP_WIFI_SSID
@@ -109,9 +108,9 @@ void xTaskToggleWaterScheduler(void * pvParameter) {
 
 // Toggles GPIO pin 12 HIGH for 2 seconds, then LOW.
 void toggleWater() {
-  gpio_set_level(GPIO_NUM_12, HIGH);
+  gpio_set_level(GPIO_NUM_12, 1);
   vTaskDelay(pdMS_TO_TICKS(2000));
-  gpio_set_level(GPIO_NUM_12, LOW);
+  gpio_set_level(GPIO_NUM_12, 0);
 }
 
 // Task to manage Wi-Fi connection and initiate time synchronization.
@@ -144,10 +143,14 @@ void xTaskWifiConnect(void * pvParameters) {
         // Connection successful, this task could suspend or periodically check connection status.
         // For now, just wait indefinitely or until disconnected.
         // Wait for disconnect event (handled by wifi_event_handler setting WIFI_FAIL_BIT)
-         xEventGroupWaitBits(s_wifi_event_group, WIFI_FAIL_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
-         ESP_LOGW(TAG, "Wi-Fi disconnected. Retrying connection process...");
-         s_time_synchronized = false; // Reset time sync status on disconnect
-         esp_sntp_stop(); // Stop SNTP
+        xEventGroupWaitBits(s_wifi_event_group, WIFI_FAIL_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
+        ESP_LOGW(TAG, "Wi-Fi disconnected. Retrying connection process...");
+        s_time_synchronized = false; // Reset time sync status on disconnect
+        esp_sntp_stop(); // Stop SNTP
+        esp_wifi_disconnect();
+        esp_wifi_stop();
+        esp_wifi_deinit();
+        break;
     } else if (bits & WIFI_FAIL_BIT) {
         ESP_LOGW(TAG, "Failed to connect to configured Wi-Fi: %s", WIFI_SSID);
         xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT); // Clear the bit
@@ -163,14 +166,18 @@ void xTaskWifiConnect(void * pvParameters) {
             portMAX_DELAY);
 
         if (bits & WIFI_CONNECTED_BIT) {
-             ESP_LOGI(TAG, "Successfully connected to an open Wi-Fi network.");
-             xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-             initialize_sntp();
-             // Wait for disconnect
-             xEventGroupWaitBits(s_wifi_event_group, WIFI_FAIL_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
-             ESP_LOGW(TAG, "Wi-Fi disconnected. Retrying connection process...");
-             s_time_synchronized = false;
-             esp_sntp_stop();
+            ESP_LOGI(TAG, "Successfully connected to an open Wi-Fi network.");
+            xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+            initialize_sntp();
+            // Wait for disconnect
+            xEventGroupWaitBits(s_wifi_event_group, WIFI_FAIL_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
+            ESP_LOGW(TAG, "Wi-Fi disconnected. Retrying connection process...");
+            s_time_synchronized = false;
+            esp_sntp_stop();
+            esp_wifi_disconnect();
+            esp_wifi_stop();
+            esp_wifi_deinit();
+            break;
         } else {
             ESP_LOGE(TAG, "Failed to connect to any network after scan.");
             xEventGroupClearBits(s_wifi_event_group, WIFI_FAIL_BIT);
@@ -297,6 +304,8 @@ int32_t initWifi() {
     return -1;
   }
 
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
   // Register event handlers
   ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
                                                         ESP_EVENT_ANY_ID,
@@ -375,11 +384,10 @@ void initialize_sntp(void) {
 
 
 // Main application entry point
-void app_main() {
+extern "C" void app_main() {
   // Initialize GPIO Pin 12 for output
-  gpio_pad_select_gpio(GPIO_NUM_12);
   gpio_set_direction(GPIO_NUM_12, GPIO_MODE_OUTPUT);
-  gpio_set_level(GPIO_NUM_12, LOW);
+  gpio_set_level(GPIO_NUM_12, 0);
 
   // Initial toggle for testing
   ESP_LOGI(TAG, "Performing initial valve toggle for testing.");
